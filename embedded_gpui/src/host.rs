@@ -4,7 +4,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,7 +18,7 @@ use futures::StreamExt as _;
 use futures::channel::mpsc;
 use gpui::{AppContext as _, Context, Entity, PlatformTextSystem, Task, px};
 use wasmtime::component::{Component, Linker};
-use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
+use wasmtime::{Cache, CacheConfig, Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{
     DirPerms, FilePerms, ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView,
 };
@@ -280,6 +280,29 @@ impl Drop for PluginInstance {
     }
 }
 
+/// A folder of compiled plugins (wasmtime's own cache): an instance whose component was
+/// compiled before, with the same settings, loads the machine code from there instead of
+/// compiling it again, which takes a fraction of the time and none of the compiler's memory.
+/// Entries are keyed by the component's contents and the engine's settings, so a changed
+/// component compiles afresh.
+///
+/// Make one per folder and give every plugin a clone (see
+/// [`PluginOptions::with_compile_cache`]): the clones share one worker thread, which keeps
+/// the folder's usage statistics and prunes it. Two caches on one folder don't corrupt it,
+/// but their workers duplicate each other's work.
+#[derive(Clone)]
+pub struct CompileCache(Cache);
+
+impl CompileCache {
+    /// Use `dir` (an absolute path; it is created if it isn't there) and start the worker
+    /// that looks after it.
+    pub fn new(dir: impl Into<PathBuf>) -> Result<Self> {
+        let mut config = CacheConfig::new();
+        config.with_directory(dir);
+        Ok(Self(Cache::new(config)?))
+    }
+}
+
 /// How often the engine's epoch advances; the granularity of the turn budget.
 const EPOCH_TICK: Duration = Duration::from_millis(10);
 
@@ -315,6 +338,10 @@ pub struct PluginOptions {
     pub limits: DisplayListLimits,
     /// The most linear memory the guest may grow to. Default: 512 MiB.
     pub memory_limit: usize,
+    /// Where compiled components are kept, if anywhere (see
+    /// [`PluginOptions::with_compile_cache`]). Default: nowhere, so every instance
+    /// compiles its component.
+    pub compile_cache: Option<CompileCache>,
 }
 
 impl PluginOptions {
@@ -327,6 +354,7 @@ impl PluginOptions {
             input_query_budget: Duration::from_millis(5),
             limits: DisplayListLimits::default(),
             memory_limit: 512 << 20,
+            compile_cache: None,
         }
     }
 
@@ -356,6 +384,13 @@ impl PluginOptions {
         self
     }
 
+    /// Keep compiled components in `cache`. Share one [`CompileCache`] between the plugins
+    /// that use a folder, by cloning it.
+    pub fn with_compile_cache(mut self, cache: CompileCache) -> Self {
+        self.compile_cache = Some(cache);
+        self
+    }
+
     /// Grant the plugin additional WASI authority (preopened dirs, env vars, ...).
     pub fn with_wasi(
         mut self,
@@ -371,6 +406,9 @@ impl PluginInstance {
         let mut config = Config::new();
         config.wasm_component_model(true);
         config.epoch_interruption(true);
+        if let Some(cache) = &options.compile_cache {
+            config.cache(Some(cache.0.clone()));
+        }
         let engine = Engine::new(&config).context("creating wasmtime engine")?;
 
         // The epoch is the clock the turn budget is measured in. A thread per instance

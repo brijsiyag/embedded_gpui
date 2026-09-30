@@ -25,6 +25,16 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.cranelift-codegen]
 opt-level = 3
+# So is loading from the compile cache (`PluginOptions::with_compile_cache`): hashing the
+# component, decompressing what was cached. Unoptimized, a hit takes nearly as long as compiling.
+[profile.dev.package.wasmtime-internal-cache]
+opt-level = 3
+[profile.dev.package.zstd-sys]
+opt-level = 3
+[profile.dev.package.zstd-safe]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
 
 # Replicated from zed's workspace: patches do not propagate through git dependencies.
 [patch.crates-io]

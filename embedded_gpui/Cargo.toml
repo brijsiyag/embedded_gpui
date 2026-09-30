@@ -44,6 +44,8 @@ wasmtime = { version = "36", default-features = false, features = [
     "component-model",
     "incremental-cache",
     "parallel-compilation",
+    # Compiled components kept on disk (`PluginOptions::with_compile_cache`).
+    "cache",
 ] }
 wasmtime-wasi = "36"
 

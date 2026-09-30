@@ -23,8 +23,8 @@ use embedded_gpui::{
     ReplaceText, TextForRange, TextRange, Utf16Selection, WireKeystroke, WireModifiers,
 };
 use embedded_gpui::{
-    Interface, Payload, PluginHost, PluginHostHandle as _, PluginInstance, PluginOptions, Ref,
-    Remote, Surface, TypeSchema, decode, encode, shared,
+    CompileCache, Interface, Payload, PluginHost, PluginHostHandle as _, PluginInstance,
+    PluginOptions, Ref, Remote, Surface, TypeSchema, decode, encode, shared,
 };
 use embedded_gpui_util::{Attenuated, Audited, Mirror};
 use gpui::{
@@ -1260,6 +1260,64 @@ async fn test_reattaching_a_surface_replaces_its_view(cx: &mut TestAppContext) {
         !first_alive.await.expect("alive"),
         "the replaced view is gone"
     );
+}
+
+/// The files under `dir`, however deep.
+fn file_count(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| {
+            let path = entry.path();
+            if path.is_dir() { file_count(&path) } else { 1 }
+        })
+        .sum()
+}
+
+/// A compile cache keeps what the first instance compiled: the next instance of the same
+/// component loads it from the cache's directory instead of compiling, and works the same.
+#[gpui::test]
+async fn test_a_compile_cache_keeps_compiled_components(cx: &mut TestAppContext) {
+    let dir = std::env::temp_dir().join(format!(
+        "embedded_gpui-compile-cache-{}",
+        std::process::id()
+    ));
+    std::fs::remove_dir_all(&dir).ok();
+    let cache = CompileCache::new(&dir).expect("a cache in the folder");
+    let options = || {
+        PluginOptions::new(Arc::new(gpui::NoopTextSystem::new())).with_compile_cache(cache.clone())
+    };
+    let path = test_plugin_path();
+
+    let started = std::time::Instant::now();
+    drop(PluginInstance::new(&path, options()).expect("compiled into the cache"));
+    let compiled = started.elapsed();
+    assert!(
+        file_count(&dir) > 0,
+        "the compiled component is in the cache"
+    );
+
+    let started = std::time::Instant::now();
+    let instance = PluginInstance::new(&path, options()).expect("loaded from the cache");
+    let loaded = started.elapsed();
+    eprintln!("compiled in {compiled:?}, loaded from the cache in {loaded:?}");
+
+    // The instance from the cache is the same plugin: a call goes through.
+    let host = cx.new(|cx| PluginHost::new(instance, cx));
+    cx.update(|cx| {
+        let root = cx.new(|_| HostRoot {
+            pings: 0,
+            clipboard: None,
+            clipboard_ref: None,
+        });
+        host.share_root(&root, cx);
+    });
+    let root = cx.update(|cx| host.root::<TestPlugin>(cx));
+    let pong = cx.update(|cx| root.ping_host("cached".to_string(), cx));
+    settle(cx);
+    assert_eq!(pong.await.expect("ping"), "pong: cached");
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[gpui::test]
