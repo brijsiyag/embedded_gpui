@@ -27,13 +27,17 @@ use embedded_gpui::{
     Remote, Surface, TypeSchema, decode, encode, shared,
 };
 use embedded_gpui_util::{Attenuated, Audited, Mirror};
-use gpui::{AppContext as _, ClipboardItem, Context, Entity, Task, TestAppContext};
+use gpui::{
+    AppContext as _, ClipboardItem, Context, Entity, IntoElement as _, Task, TestAppContext,
+    VisualTestContext,
+};
 use rand::prelude::*;
 use test_schema::{
     Bump, ChameleonApi, ChameleonState, Count, CounterMilestone, FactoryApi, FactoryApiCaller as _,
     GatekeeperApi, GatekeeperApiCaller as _, Increment, ItemApiCaller as _, KeyApi,
     KeyApiCaller as _, SeenGeometry, TestCounterApi, TestCounterApiCaller as _, TestHost,
-    TestPlugin, TestPluginCaller as _, VaultApi, VaultApiCaller as _, ViewProbeApiCaller as _,
+    TestPlugin, TestPluginCaller as _, VaultApi, VaultApiCaller as _, ViewProbeApi,
+    ViewProbeApiCaller as _,
 };
 
 /// Builds the test plugin once per process and returns the component path.
@@ -1103,6 +1107,97 @@ async fn test_promise_pipelining_uses_a_ref_before_it_arrives(cx: &mut TestAppCo
     assert!(
         error.to_string().contains("capability revoked"),
         "unexpected error: {error}"
+    );
+}
+
+/// Draw `surface` in the test window's one slot (200 × 100 at the origin), as a host's layout
+/// would: the surface measures its slot and tells its view.
+fn draw_in_slot(window: &mut VisualTestContext, surface: &Entity<Surface>) {
+    let surface = surface.clone();
+    window.draw(
+        gpui::point(gpui::px(0.), gpui::px(0.)),
+        gpui::size(gpui::px(200.), gpui::px(100.)),
+        |_, _| surface.into_any_element(),
+    );
+    settle(window);
+}
+
+/// Click inside the slot, as the host forwards a click on `surface` to its view.
+fn click_through(cx: &mut TestAppContext, surface: &Entity<Surface>) {
+    let view = surface
+        .read_with(cx, |surface, _| surface.view().cloned())
+        .expect("the guest attached a view");
+    let click = MouseButtonEvent {
+        button: MouseButton::Left,
+        position: Point { x: 10., y: 10. },
+        modifiers: Modifiers::default(),
+        click_count: 1,
+    };
+    cx.update(|cx| {
+        view.mouse(MouseEvent::Down(click.clone()), cx);
+        view.mouse(MouseEvent::Up(click), cx);
+    });
+    settle(cx);
+}
+
+/// A host that keeps several surfaces in one slot and shows one at a time (tabs) hides the
+/// others. Without that, every view stays a root of the guest window at the same place, and
+/// the one attached last covers the slot: it takes the clicks meant for the one shown. A
+/// hidden surface's view is detached instead: it takes no input, and keeps its state (and the
+/// surface its scene) for when it is shown again.
+#[gpui::test]
+async fn test_hidden_surfaces_take_no_input_and_keep_their_state(cx: &mut TestAppContext) {
+    let host = setup(cx);
+    let root = cx.update(|cx| host.root::<TestPlugin>(cx));
+    let mut window = cx.add_empty_window().clone();
+    let (first, second) = (cx.new(Surface::new), cx.new(Surface::new));
+    let first_probe = cx.update(|cx| root.mount(host.share(&first, cx), cx));
+    let second_probe = cx.update(|cx| root.mount(host.share(&second, cx), cx));
+    settle(cx);
+    let first_probe = first_probe.await.expect("first mount");
+    let second_probe = second_probe.await.expect("second mount");
+    let set_hidden = |cx: &mut TestAppContext, surface: &Entity<Surface>, hidden: bool| {
+        surface.update(cx, |surface, cx| surface.set_hidden(hidden, cx));
+        settle(cx);
+    };
+    let clicks = |cx: &mut TestAppContext, probe: &Remote<ViewProbeApi>| {
+        let clicks = cx.update(|cx| probe.clicks(cx));
+        settle(cx);
+        clicks
+    };
+
+    // The first tab, then the second in its place: the first is hidden as the second shows.
+    draw_in_slot(&mut window, &first);
+    set_hidden(cx, &first, true);
+    draw_in_slot(&mut window, &second);
+    // Back to the first. The second, attached last, would cover the slot if it stayed.
+    set_hidden(cx, &second, true);
+    set_hidden(cx, &first, false);
+    draw_in_slot(&mut window, &first);
+    click_through(cx, &first);
+    assert_eq!(clicks(cx, &first_probe).await.expect("clicks"), 1);
+    assert_eq!(
+        clicks(cx, &second_probe).await.expect("clicks"),
+        0,
+        "the hidden view took no input"
+    );
+    assert!(
+        second.read_with(cx, |surface, _| surface.is_hidden() && surface.has_scene()),
+        "a hidden surface keeps its scene"
+    );
+
+    // The second again: it is the view it was, and the first, hidden now, keeps its count.
+    set_hidden(cx, &first, true);
+    set_hidden(cx, &second, false);
+    draw_in_slot(&mut window, &second);
+    click_through(cx, &second);
+    assert_eq!(clicks(cx, &second_probe).await.expect("clicks"), 1);
+    assert_eq!(clicks(cx, &first_probe).await.expect("clicks"), 1);
+    let alive = cx.update(|cx| first_probe.view_alive(cx));
+    settle(cx);
+    assert!(
+        alive.await.expect("alive"),
+        "hiding does not release the view"
     );
 }
 

@@ -498,9 +498,17 @@ impl PluginPlatform {
 
     /// Put a surface's view where the host says it is: attach it as a root of the guest
     /// window mirroring the surface's host window (moving it between windows if the
-    /// surface moved), at the slot's bounds.
+    /// surface moved), at the slot's bounds. An empty slot (the host hid the surface, or
+    /// laid it out with no size) detaches the view: it stays registered, with its state,
+    /// and the next slot with a size places it again.
     fn place(&self, surface: u64, geometry: Geometry, async_app: &mut AsyncApp) -> Result<()> {
         if geometry.width <= 0. || geometry.height <= 0. {
+            let placed = self
+                .views
+                .borrow_mut()
+                .get_mut(&surface)
+                .and_then(|view| view.placed.take());
+            async_app.update(|cx| self.unplace(placed, cx));
             return Ok(());
         }
         let Some((view, placed)) = self.views.borrow().get(&surface).map(|view| {

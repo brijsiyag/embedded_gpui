@@ -57,6 +57,8 @@ pub struct Surface {
     /// follows is not mistaken for keyboard traversal entering it.
     focus_by_pointer: bool,
     focus_in: Option<gpui::Subscription>,
+    /// The host is not showing this surface (see [`Surface::set_hidden`]).
+    hidden: bool,
 }
 
 impl Surface {
@@ -74,6 +76,7 @@ impl Surface {
             stopped: None,
             focus_by_pointer: false,
             focus_in: None,
+            hidden: false,
         }
     }
 
@@ -103,6 +106,45 @@ impl Surface {
             InputAnswer::None => None,
             answer => Some(answer),
         }
+    }
+
+    /// Stop showing this surface, or show it again. A host that keeps several surfaces in
+    /// one slot and shows one at a time (tabs) hides the others: otherwise their views stay
+    /// roots of the guest window at the same place, where they are drawn and hit-tested and
+    /// take the input meant for the one shown.
+    ///
+    /// While hidden, the view is detached from its guest window: it keeps its state, but
+    /// draws nothing and receives nothing. The surface keeps its last scene, so when it is
+    /// shown again it paints that at once, until the view draws a new one. What the view
+    /// keeps in its window's element state (an untracked scroll offset, say) starts over.
+    pub fn set_hidden(&mut self, hidden: bool, cx: &mut Context<Self>) {
+        if self.hidden == hidden {
+            return;
+        }
+        self.hidden = hidden;
+        if hidden {
+            if let (Some(view), Some(geometry)) = (&self.view, self.geometry) {
+                // An empty slot: the guest detaches the view.
+                view.resize(
+                    Geometry {
+                        width: 0.,
+                        height: 0.,
+                        ..geometry
+                    },
+                    cx,
+                );
+            }
+            // A popover open when the surface hid is not shown again with the old scene.
+            self.overlay = None;
+        }
+        // Hidden or shown, the slot goes out again the next time the surface is drawn.
+        self.geometry = None;
+        cx.notify();
+    }
+
+    /// Whether the host has hidden this surface ([`Surface::set_hidden`]).
+    pub fn is_hidden(&self) -> bool {
+        self.hidden
     }
 
     /// The view currently drawing here, if a guest has attached one.
@@ -243,8 +285,12 @@ impl Surface {
     }
 
     /// Record the slot's measured geometry — its bounds and the window it is in — and
-    /// push it to the view if any of it changed.
+    /// push it to the view if any of it changed. Nothing goes out while the surface is
+    /// hidden: its view stays detached.
     fn measured(&mut self, bounds: Bounds<Pixels>, window: &Window, cx: &mut Context<Self>) {
+        if self.hidden {
+            return;
+        }
         let viewport = window.viewport_size();
         let geometry = Geometry {
             x: f32::from(bounds.origin.x),

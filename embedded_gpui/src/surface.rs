@@ -56,6 +56,9 @@ pub trait ViewApi {
 /// and draws each view as a root of that window at the slot's real origin. So inside a
 /// view, `window.viewport_size()` is the host's viewport, a popover clamps to the host
 /// window's edges, and two views cannot overlap unless the host overlaps their slots.
+/// A slot with no width or height is no slot: the guest detaches the view (it keeps its
+/// state) until a slot with a size comes. That is how a host hides a surface
+/// (`Surface::set_hidden`).
 #[data]
 #[derive(Copy, PartialEq)]
 pub struct Geometry {

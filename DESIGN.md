@@ -170,7 +170,12 @@ the rule for it is the same as for every plugin: events and notifies, not animat
    clamps to the host window's edges, the scale factor is the display's, and two views
    cannot interact unless the host overlaps their slots. A surface that moves to another
    host window moves its root to that window's mirror; a mirror with no roots left
-   closes. After each frame the pump reads every root's scene on its own with
+   closes. A host that keeps several surfaces in one slot (tabs) hides all but the one it
+   shows (`Surface::set_hidden`): a hidden surface sends an empty slot, and the guest
+   detaches its view, which keeps its state but is neither drawn nor hit-tested, so the
+   views sharing the slot never take each other's input; the host keeps painting the
+   hidden surface's last scene when it shows it again, until a new one comes.
+   After each frame the pump reads every root's scene on its own with
    `AttachedRoot::take_scene`, which answers only for roots whose node was redrawn, so an
    idle surface ships nothing and a changed one ships exactly its own display list
    (translated back to slot-relative coordinates). A view is not drawn until the host
